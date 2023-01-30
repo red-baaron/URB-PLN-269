@@ -1,5 +1,5 @@
 ---
-title: "Census Data Pull"
+title: "URB PLN 269"
 author: "Aaron Barrall"
 date: "01/18/2023"
 output: html_document
@@ -11,12 +11,14 @@ library(tidycensus)
 library(spatial)
 library(sf)
 library(readxl)
-library(rsegregation)
+#library(rsegregation)
 library(leaflet)
 library(tm)
+library(mapview)
+library(leafsync)
 set.seed(1234)
 ```
-
+# Run this if you want to clear the data. 
 ```{r}
 rm(list=ls())
 ```
@@ -135,19 +137,23 @@ acs_data_tract <- acs_data_tract %>%
 
 acs_data_tract <- acs_data_tract[, -grep("E$", colnames(acs_data_tract))] #Drop remaining estimates, leaving only percent and necessary estimates
 
-write_csv(acs_data_tract,"Working/CleanedTract.csv")
+
+saveRDS(acs_data_tract,"Working/acs_data_tract.RDS")
+#write_csv(acs_data_tract,"Working/CleanedTract.csv")
 
 ```
 # Load in HCD Income Limits.
 
 ```{r}
-acs_data_tract <- read_csv("Working/CleanedTract.csv")
+#acs_data_tract_nospatial <- read_csv("Working/CleanedTract.csv")
+
+acs_data_tract <- readRDS("Working/acs_data_tract.RDS")
 
 
 #Identify the Counties in the data
 acs_data_tract <- acs_data_tract %>% separate(col=name,into = c("tract","county","state"),sep=",") #Split the name column into three so we can see the Counties
-acs_data_tract$county <- str_remove(acs_data_tract$county," County")
-acs_data_tract$county <- trimws(acs_data_tract$county,"both")
+  acs_data_tract$county <- str_remove(acs_data_tract$county," County")
+  acs_data_tract$county <- trimws(acs_data_tract$county,"both")
 
 HCD_Data <- read_csv("Input/2022-income-limits.csv")
   HCD_Data <- HCD_Data %>% select(County,AMI,LI_4) 
@@ -155,22 +161,68 @@ HCD_Data <- read_csv("Input/2022-income-limits.csv")
   acs_data_tract$county <- toupper(acs_data_tract$county)
   
 
-combined <- merge(acs_data_tract,HCD_Data,by.x="county",by.y="County",all.x=T)
+combined <- acs_data_tract %>% left_join(HCD_Data,by=c("county"="County"))
+          # combined <- merge(acs_data_tract,HCD_Data,by.x="county",by.y="County",all.x=T)  # OLD way to join, doesn't preserve geometries like DPLYR.
+          
 combined$StateAMI80 <- 101600*0.8
 
-unique(combined[is.na(combined$AMI),"county"])  #Which counties are not working???!!!!
+unique(combined[is.na(combined$AMI),"county"])  #Which counties are not working???!!!!  
 
 ```
 # Is the tract below the income limit?
 ```{r}
-combined$median_income
 
 combined$LowIncomeTract #Initialize the column.
-combined$LowIncomeTract <- combined$median_income < combined$LI_4 | combined$median_income < combined$StateAMI80
+combined$LowIncomeTract <- combined$median_income < combined$LI_4 | combined$median_income < combined$StateAMI80 #Add indicator column - True if income is below either state or County low income limit.
+
+combined$LowIncomeState
+combined$LowIncomeState <- combined$median_income < combined$StateAMI80
 
 ```
 
 ```{r}
+# Testing out mapview
+mapview(combined,zcol="LowIncomeTract") #Tracts that meet either one of the definitions of Low Income
+
+mapview(combined,zcol="LowIncomeState") #Tracts that are below the state AMI.
+```
+
+# Load in CES/DAC Data
+```{r}
+layers <- st_layers("Input/CES4.gdb")
+layers
+
+layers <- st_layers("Input/SB535.gdb")
+layers
+
+CES4Final <- st_read("Input/CES4.gdb",layer="CES4_final")
+DAC <- st_read("Input/SB535.gdb",layer="SB535tracts2022")
+```
+# Find Areas that are not SB 535, then see if they are low-income according to the state!
+```{r}
+DACM <- mapview(DAC)
+IncomeM <- mapview(combined,zcol="LowIncomeTract")
+sync(DACM,IncomeM)
+```
+
+
+# Working - Not used code
+```{r}
+# Testing out Leaflet
+pal <- colorNumeric(
+  palette = "red",
+  domain=combined$LowIncomeTract
+)
+
+combined %>% 
+  st_transform(crs="+init=epsg:4326") %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(data=combined,
+              fillColor = ~pal(LowIncomeTract))
+
+
+
 
 ```
 # Calculate Divergence
@@ -180,66 +232,6 @@ california_divergence <- acs_data_tract %>%
   summarise(ca_divergence = divergence(race_white_per,race_black_per,race_amindian_per,race_asian_per,race_pacisl_per,race_other_per,race_twoplus_per,race_hisp_per,population = totalpop, summed=T))
 
 write_csv(california_divergence,"Output/DivergenceCA.csv")
-
-```
-
-# Join with Existing Data
-```{r}
-working_data <-
-  read_excel("Source - Clean/data rezonings_fromPaavo_20221213.xls")  # Data from Paavo.
-
-working_data <-
-  working_data %>% select(
-    geography,
-    compliantasofnovember1,
-    capacity_6th,
-    rezone_units,
-    capacity_5th,
-    share_rezone
-  ) #Only need a few columns from this data
-
-RHNA_Allocations <- 
-  read_excel("Source - Clean/RHNA - Allocation.xlsx")
-
-Places <- 
-  read_excel("Source - Clean/PlaceNames.xlsx")
-
-RHNA_Allocations <-
-  RHNA_Allocations %>% mutate(geography = toupper(Jurisdiction))
-Places <- Places %>% mutate(Census_name = toupper(Census_name))
-
-acs_data_city <- acs_data_city %>% mutate(Census_name = toupper(name))
-
-working_data <-
-  working_data %>% mutate(geography = toupper(geography))
-
-combined <-
-  merge(
-    Places,
-    acs_data_city,
-    by.x = "Census_name",
-    by.y = "Census_name",
-    all.x = T
-  )
-
-combined <-
-  merge(
-    combined,
-    RHNA_Allocations,
-    by.x = "City",
-    by.y = "Jurisdiction")  # We Lose two here
-
-combined <-
-  merge(
-    combined,
-    working_data,
-    by.x = "Census_name",
-    by.y = "geography",
-    all.x = T
-  )
-combined <- combined %>% select(-GEOID.x,-name) #remove unneeded columns. 
-
-#write_csv(combined,"Output/combined_initial.csv")
 
 ```
 
