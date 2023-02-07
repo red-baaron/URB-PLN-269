@@ -16,6 +16,8 @@ library(leaflet)
 library(tm)
 library(mapview)
 library(leafsync)
+library(crsuggest)
+library(rgeos)
 set.seed(1234)
 ```
 # Run this if you want to clear the data. 
@@ -162,10 +164,7 @@ HCD_Data <- read_csv("Input/2022-income-limits.csv")
   
 
 combined <- acs_data_tract %>% left_join(HCD_Data,by=c("county"="County"))
-          # combined <- merge(acs_data_tract,HCD_Data,by.x="county",by.y="County",all.x=T)  # OLD way to join, doesn't preserve geometries like DPLYR.
-          
-combined$StateAMI80 <- 101600*0.8
-
+combined$StateAMI80 <- 101600*0.8 #State AMI is $101,600
 unique(combined[is.na(combined$AMI),"county"])  #Which counties are not working???!!!!  
 
 ```
@@ -189,12 +188,6 @@ mapview(combined,zcol="LowIncomeState") #Tracts that are below the state AMI.
 
 # Load in CES/DAC Data
 ```{r}
-layers <- st_layers("Input/CES4.gdb")
-layers
-
-layers <- st_layers("Input/SB535.gdb")
-layers
-
 CES4Final <- st_read("Input/CES4.gdb",layer="CES4_final")
 DAC <- st_read("Input/SB535.gdb",layer="SB535tracts2022")
 ```
@@ -203,8 +196,80 @@ DAC <- st_read("Input/SB535.gdb",layer="SB535tracts2022")
 DACM <- mapview(DAC)
 IncomeM <- mapview(combined,zcol="LowIncomeTract")
 sync(DACM,IncomeM)
+
+#These maps show that there is a gap between DACs and what is considered a low-income area. 
+```
+# Data Crosswalk
+```{r}
+crosswalk <- read.table("Input/tab20_tract20_tract10_st06.txt",sep="|")
+colnames(crosswalk) <- crosswalk[1,]
+crosswalk <- crosswalk[-1,]
+crosswalk <- crosswalk %>% select(GEOID_TRACT_20,GEOID_TRACT_10) %>% 
+  mutate(Tract10Num=as.numeric(GEOID_TRACT_10))
+
+# Join to ACS_Data
+
+combined <- right_join(combined,crosswalk,by=c("GEOID"="GEOID_TRACT_20")) # Use a right join to retain the geometry
+
+#Get rid of geometry so we can use a DPLYR join
+CES4_nogeom <- st_drop_geometry(CES4Final)
+DAC_nogeom <- st_drop_geometry(DAC)
+
+DAC_nogeom <- DAC_nogeom %>% select(Tract,DAC_category) #Select the important columns in the DAC field.
+
+combined <- left_join(combined,CES4_nogeom,by=c("Tract10Num"="Tract"))
+combined <- left_join(combined,DAC_nogeom,by=c("Tract10Num"="Tract"))
+
+# Taking the Average of CES Scores for the new geometries
+
+data <- combined %>% group_by(GEOID) %>% 
+  mutate_each(funs(mean),Pollution,PollutionScore) %>%  
+  distinct(GEOID,.keep_all=TRUE)
+
+
+mapview(data)
+
+#Map tracts that are both Low Income and Non-DACs.
+data %>% filter(LowIncomeTract==TRUE,
+                is.na(DAC_category)==TRUE) %>% 
+  mapview()
+
+
+
+class(data)
+dim(data)
+
 ```
 
+# Spatial Join the data sources
+## Reproject the Data
+```{r}
+st_crs(CES4Final) #EPSG 3310
+st_crs(combined) #EPSG 4269
+
+CES4Final <- st_transform(CES4Final,4269) #Transform the CES to the same reference system as the ACS data. 
+
+```
+## Conduct a Spatial Join
+```{r}
+combined_Centroid <- st_point_on_surface(combined)
+
+sf::sf_use_s2(FALSE)
+
+spJoined <- st_join(
+    combined_Centroid,CES4Final,
+    join=st_intersects,
+    suffix=c("_acs","_CES"),
+    sparse=TRUE,
+    left=TRUE
+  )
+
+
+
+mapview(combined)+
+  mapview(combined_Centroid)
+
+```
 
 # Working - Not used code
 ```{r}
