@@ -226,18 +226,37 @@ data <- combined %>% group_by(GEOID) %>%
   mutate_each(funs(mean),Pollution,PollutionScore) %>%  
   distinct(GEOID,.keep_all=TRUE)
 
-
-mapview(data)
-
-#Map tracts that are both Low Income and Non-DACs.
-data %>% filter(LowIncomeTract==TRUE,
-                is.na(DAC_category)==TRUE) %>% 
-  mapview()
+# Add tracts that are not DACs and are below one of the income limits
+possibleDACs <- filter(data,LowIncomeTract==TRUE,
+                is.na(DAC_category)==TRUE)
 
 
+data$possibleDAC <- NA
+data$possibleDAC <- data$LowIncomeTract==TRUE & is.na(data$DAC_category)==TRUE
+
+sum(data$possibleDAC==T,na.rm=T)  # There are potentially 3411 DACs based on the income provisions of SB 1000. 
+
+mapview(possibleDACs)+
+  mapview(DAC)
 
 class(data)
 dim(data)
+
+```
+# Local Ranking of CalEnviroScreen, Identification of new DACs based on income and CES local pollution scores.
+```{r}
+data<- data %>% group_by(County) %>% mutate(Pollution_County = rank(PollutionScore),
+                                            CountyPercentile = Pollution_County/length(Pollution_County))
+
+
+data$HighLocalPollution <- NA
+data$HighLocalPollution <- data$CountyPercentile >=.75
+
+data$LOCALDAC <- data$HighLocalPollution==TRUE & data$possibleDAC==TRUE
+
+sum(data$LOCALDAC,na.rm=T)  #THIS METHOD IDENTIFIES 591 NEW CENSUS TRACTS THAT WERE PREVIOUSLY NOT CONSIDERED!!!!!!!!
+
+mapview(data,zcol="LOCALDAC")
 
 ```
 
