@@ -151,14 +151,13 @@ saveRDS(acs_data_tract,"Working/acs_data_tract.RDS")
 
 acs_data_tract <- readRDS("Working/acs_data_tract.RDS")
 
-
 #Identify the Counties in the data
 acs_data_tract <- acs_data_tract %>% separate(col=name,into = c("tract","county","state"),sep=",") #Split the name column into three so we can see the Counties
   acs_data_tract$county <- str_remove(acs_data_tract$county," County")
   acs_data_tract$county <- trimws(acs_data_tract$county,"both")
 
 HCD_Data <- read_csv("Input/2022-income-limits.csv")
-  HCD_Data <- HCD_Data %>% select(County,AMI,LI_4) 
+  HCD_Data <- HCD_Data %>% select(County,AMI,LI_4) #LI 4 is county low income limit for family of four. 
   HCD_Data$County <- toupper(HCD_Data$County)
   acs_data_tract$county <- toupper(acs_data_tract$county)
   
@@ -201,63 +200,61 @@ sync(DACM,IncomeM)
 ```
 # Data Crosswalk
 ```{r}
+# Load the ACS crosswalk data, and do some basic conversions toso we can manipulate them later.
 crosswalk <- read.table("Input/tab20_tract20_tract10_st06.txt",sep="|")
 colnames(crosswalk) <- crosswalk[1,]
 crosswalk <- crosswalk[-1,]
-crosswalk <- crosswalk %>% select(GEOID_TRACT_20,GEOID_TRACT_10) %>% 
-  mutate(Tract10Num=as.numeric(GEOID_TRACT_10))
+crosswalk <- crosswalk %>% select(GEOID_TRACT_20,GEOID_TRACT_10,AREALAND_TRACT_20,AREALAND_TRACT_10,AREALAND_PART,AREAWATER_PART) %>% 
+  mutate(Tract10Num=as.numeric(GEOID_TRACT_10),
+         AREALAND_TRACT_20=as.numeric(AREALAND_TRACT_20),
+         AREALAND_TRACT_10=as.numeric(AREALAND_TRACT_10),
+         AREALAND_PART=as.numeric(AREALAND_PART),
+         PercentPrevious=AREALAND_PART*100/AREALAND_TRACT_20
+         )
 
-# Join to ACS_Data
+# Join Crosswalk to ACS_Data
+  combined <- right_join(combined,crosswalk,by=c("GEOID"="GEOID_TRACT_20")) # Use a right join to retain the geometry
 
-combined <- right_join(combined,crosswalk,by=c("GEOID"="GEOID_TRACT_20")) # Use a right join to retain the geometry
-
-#Get rid of geometry so we can use a DPLYR join
-CES4_nogeom <- st_drop_geometry(CES4Final)
-DAC_nogeom <- st_drop_geometry(DAC)
+#Get rid of geometry so we can use a DPLYR join (can't join two geometries to each other)
+  CES4_nogeom <- st_drop_geometry(CES4Final)
+  DAC_nogeom <- st_drop_geometry(DAC)
 
 DAC_nogeom <- DAC_nogeom %>% select(Tract,DAC_category) #Select the important columns in the DAC field.
 
+#Join the CES and DAC information.
 combined <- left_join(combined,CES4_nogeom,by=c("Tract10Num"="Tract"))
 combined <- left_join(combined,DAC_nogeom,by=c("Tract10Num"="Tract"))
 
+combined <- combined %>% mutate(
+  PollutionAWeighted = (PercentPrevious*PollutionScore)/100   #This will be used below to calculate the areal weighted average for the pollution scores by tract. 
+)
+
 # Taking the Average of CES Scores for the new geometries
-
 data <- combined %>% group_by(GEOID) %>% 
-  mutate_each(funs(mean),Pollution,PollutionScore) %>%  
-  distinct(GEOID,.keep_all=TRUE)
+  mutate_each(funs(mean),PollutionAWeighted,PollutionScore) %>%  
+  distinct(GEOID,.keep_all=TRUE) #PollutionAWeighted is the area weighted score, while the pollution score is just the unadjusted average.
 
-# Add tracts that are not DACs and are below one of the income limits
-possibleDACs <- filter(data,LowIncomeTract==TRUE,
-                is.na(DAC_category)==TRUE)
-
-
+#Identify Possibe DACs (that are not considered DACs by CES)!
 data$possibleDAC <- NA
 data$possibleDAC <- data$LowIncomeTract==TRUE & is.na(data$DAC_category)==TRUE
 
 sum(data$possibleDAC==T,na.rm=T)  # There are potentially 3411 DACs based on the income provisions of SB 1000. 
-
-mapview(possibleDACs)+
-  mapview(DAC)
-
-class(data)
-dim(data)
-
 ```
 # Local Ranking of CalEnviroScreen, Identification of new DACs based on income and CES local pollution scores.
+
 ```{r}
-data<- data %>% group_by(County) %>% mutate(Pollution_County = rank(PollutionScore),
+#Rank the Area Weighted Pollution scores within each County, calculate a percentile rank.
+data<- data %>% group_by(County) %>% mutate(Pollution_County = rank(PollutionAWeighted),
                                             CountyPercentile = Pollution_County/length(Pollution_County))
 
-
+#
 data$HighLocalPollution <- NA
 data$HighLocalPollution <- data$CountyPercentile >=.75
 
 data$LOCALDAC <- data$HighLocalPollution==TRUE & data$possibleDAC==TRUE
+sum(data$LOCALDAC,na.rm=T)  #THIS METHOD IDENTIFIES 699 NEW CENSUS TRACTS THAT WERE PREVIOUSLY NOT CONSIDERED!!!!!!!!
 
-sum(data$LOCALDAC,na.rm=T)  #THIS METHOD IDENTIFIES 591 NEW CENSUS TRACTS THAT WERE PREVIOUSLY NOT CONSIDERED!!!!!!!!
-
-mapview(data,zcol="LOCALDAC")
-
+#mapview(data,zcol="LOCALDAC")+mapview(DAC)
 ```
 
 # Spatial Join the data sources
@@ -267,7 +264,6 @@ st_crs(CES4Final) #EPSG 3310
 st_crs(combined) #EPSG 4269
 
 CES4Final <- st_transform(CES4Final,4269) #Transform the CES to the same reference system as the ACS data. 
-
 ```
 ## Conduct a Spatial Join
 ```{r}
