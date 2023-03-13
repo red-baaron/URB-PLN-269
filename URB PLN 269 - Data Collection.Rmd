@@ -19,6 +19,8 @@ library(leafsync)
 library(crsuggest)
 library(rgeos)
 set.seed(1234)
+
+
 ```
 # Run this if you want to clear the data. 
 ```{r}
@@ -26,7 +28,7 @@ rm(list=ls())
 ```
 # Census Data Pull - 5 Year ACS City, 2021
 ```{r}
-#census_api_key("0bb4ac54f5ef401013b255be5f5c4f4d8960d00a", install=T)  #Census API key created for UCLA.
+#census_api_key("", install=T)  #Census API key created for UCLA.
 
 census_data <- load_variables (2021, "acs5", cache=T) #Load available data - use this to identify the table codes for the API call below.
 
@@ -147,8 +149,6 @@ saveRDS(acs_data_tract,"Working/acs_data_tract.RDS")
 # Load in HCD Income Limits.
 
 ```{r}
-#acs_data_tract_nospatial <- read_csv("Working/CleanedTract.csv")
-
 acs_data_tract <- readRDS("Working/acs_data_tract.RDS")
 
 #Identify the Counties in the data
@@ -180,9 +180,9 @@ combined$LowIncomeState <- combined$median_income < combined$StateAMI80
 
 ```{r}
 # Testing out mapview
-mapview(combined,zcol="LowIncomeTract") #Tracts that meet either one of the definitions of Low Income
-
-mapview(combined,zcol="LowIncomeState") #Tracts that are below the state AMI.
+# mapview(combined,zcol="LowIncomeTract") #Tracts that meet either one of the definitions of Low Income
+# 
+# mapview(combined,zcol="LowIncomeState") #Tracts that are below the state AMI.
 ```
 
 # Load in CES/DAC Data
@@ -190,17 +190,9 @@ mapview(combined,zcol="LowIncomeState") #Tracts that are below the state AMI.
 CES4Final <- st_read("Input/CES4.gdb",layer="CES4_final")
 DAC <- st_read("Input/SB535.gdb",layer="SB535tracts2022")
 ```
-# Find Areas that are not SB 535, then see if they are low-income according to the state!
-```{r}
-DACM <- mapview(DAC)
-IncomeM <- mapview(combined,zcol="LowIncomeTract")
-sync(DACM,IncomeM)
-
-#These maps show that there is a gap between DACs and what is considered a low-income area. 
-```
 # Data Crosswalk
 ```{r}
-# Load the ACS crosswalk data, and do some basic conversions toso we can manipulate them later.
+# Load the ACS crosswalk data, and do some basic conversions so we can manipulate them later.
 crosswalk <- read.table("Input/tab20_tract20_tract10_st06.txt",sep="|")
 colnames(crosswalk) <- crosswalk[1,]
 crosswalk <- crosswalk[-1,]
@@ -231,8 +223,11 @@ combined <- combined %>% mutate(
 
 # Taking the Average of CES Scores for the new geometries
 data <- combined %>% group_by(GEOID) %>% 
-  mutate_each(funs(mean),PollutionAWeighted,PollutionScore) %>%  
+  mutate_each(funs(sum),PollutionAWeighted) %>%  
   distinct(GEOID,.keep_all=TRUE) #PollutionAWeighted is the area weighted score, while the pollution score is just the unadjusted average.
+
+data %>% select(GEOID,PollutionAWeighted) %>% st_drop_geometry() %>% write_csv("Output/CES_Converted.csv")
+
 
 #Identify Possibe DACs (that are not considered DACs by CES)!
 data$possibleDAC <- NA
@@ -248,14 +243,26 @@ data<- data %>% group_by(County) %>% mutate(Pollution_County = rank(PollutionAWe
                                             CountyPercentile = Pollution_County/length(Pollution_County))
 
 #
-data$HighLocalPollution <- NA
-data$HighLocalPollution <- data$CountyPercentile >=.75
+data$HighLocalPollution75 <- NA
+data$HighLocalPollution75 <- data$CountyPercentile >=.75
 
-data$LOCALDAC <- data$HighLocalPollution==TRUE & data$possibleDAC==TRUE
-sum(data$LOCALDAC,na.rm=T)  #THIS METHOD IDENTIFIES 699 NEW CENSUS TRACTS THAT WERE PREVIOUSLY NOT CONSIDERED!!!!!!!!
+data$HighLocalPollution85 <- NA
+data$HighLocalPollution85 <- data$CountyPercentile >=.85
 
-#mapview(data,zcol="LOCALDAC")+mapview(DAC)
+data$HighLocalPollution90 <- NA
+data$HighLocalPollution90 <- data$CountyPercentile >=.90
+
+
+data$LOCALDAC <- data$HighLocalPollution85==TRUE & data$possibleDAC==TRUE
+sum(data$LOCALDAC,na.rm=T)  
+
+#data %>% st_drop_geometry() %>% write_csv("Output/PossibleDACs.csv")
+
+
+
+
 ```
+
 
 # Spatial Join the data sources
 ## Reproject the Data
@@ -263,55 +270,85 @@ sum(data$LOCALDAC,na.rm=T)  #THIS METHOD IDENTIFIES 699 NEW CENSUS TRACTS THAT W
 st_crs(CES4Final) #EPSG 3310
 st_crs(combined) #EPSG 4269
 
-CES4Final <- st_transform(CES4Final,4269) #Transform the CES to the same reference system as the ACS data. 
+DAC <- st_transform(DAC,4269) #Transform the CES to the same reference system as the ACS data. 
 ```
 ## Conduct a Spatial Join
 ```{r}
-combined_Centroid <- st_point_on_surface(combined)
+# First, we join the DACs to the new combined dataset. This will show us any census tract that a DAC centroid intersects. 
+
+combined_Centroid <- st_point_on_surface(DAC)
 
 sf::sf_use_s2(FALSE)
 
 spJoined <- st_join(
-    combined_Centroid,CES4Final,
+    data,combined_Centroid,
     join=st_intersects,
-    suffix=c("_acs","_CES"),
+    suffix=c("_acs","_DAC"),
     sparse=TRUE,
     left=TRUE
   )
 
 
+#Now we need to identify any tract that a DAC centroid intersects right now
+combined_Centroid <- st_point_on_surface(spJoined)
+sf::sf_use_s2(FALSE)
 
-mapview(combined)+
-  mapview(combined_Centroid)
-
-```
-
-# Working - Not used code
-```{r}
-# Testing out Leaflet
-pal <- colorNumeric(
-  palette = "red",
-  domain=combined$LowIncomeTract
-)
-
-combined %>% 
-  st_transform(crs="+init=epsg:4326") %>% 
-  leaflet() %>% 
-  addTiles() %>% 
-  addPolygons(data=combined,
-              fillColor = ~pal(LowIncomeTract))
+spJoined2 <- st_join(
+    DAC,combined_Centroid,
+    join=st_intersects,
+    suffix=c("_DAC","_data"),
+    sparse=TRUE,
+    left=TRUE
+  )
 
 
+DAC_2 <- spJoined2 %>% select(GEOID,DAC_category) %>% st_drop_geometry()
 
 
-```
-# Calculate Divergence
-```{r}
+data <- left_join(spJoined,DAC_2,by=c("GEOID"="GEOID"))
 
-california_divergence <- acs_data_tract %>% 
-  summarise(ca_divergence = divergence(race_white_per,race_black_per,race_amindian_per,race_asian_per,race_pacisl_per,race_other_per,race_twoplus_per,race_hisp_per,population = totalpop, summed=T))
 
-write_csv(california_divergence,"Output/DivergenceCA.csv")
+newDACS <- data %>% filter(!is.na(DAC_category)|!is.na(DAC_category_acs)|!is.na(DAC_category_DAC)) %>% 
+  mutate(Disadvantaged_Complete = T) %>% st_drop_geometry()
+
+newDACS <- newDACS %>% select(GEOID,Disadvantaged_Complete)
+
+data <- left_join(data,newDACS,by=c("GEOID"="GEOID")) 
+
+# 
+# data[data %>% filter(is.na(DAC_category)),]$Disadvantaged_Complete <- F
+# 
+# data[!is.na(data$DAC_category),]$Disadvantaged_Complete <- T
+# data[!is.na(data$DAC_category)|!is.na(data$DAC_category_acs)|!is.na(data$DAC_category_DAC),"Disadvantaged_Complete"] <- T 
+# 
+# data[!is.na(data$DAC_category)|!is.na(data$DAC_category_acs)|!is.na(data$DAC_category_DAC),]$Disadvantaged_Complete <- T   # For some reason we lose our shape here.
+
+data <- data %>% distinct() #Remove Duplicates
+data <- data[!duplicated(data$GEOID),] #Remove final duplicates
+
+
+
+data$possibleDAC <- NA
+data$possibleDAC <- data$LowIncomeTract==TRUE & is.na(data$Disadvantaged_Complete)==TRUE
+
+data$HighLocalPollution75 <- NA
+data$HighLocalPollution75 <- data$CountyPercentile >=.75
+
+data$HighLocalPollution85 <- NA
+data$HighLocalPollution85 <- data$CountyPercentile >=.85
+
+data$HighLocalPollution90 <- NA
+data$HighLocalPollution90 <- data$CountyPercentile >=.90
+
+
+data$LOCALDAC <- data$HighLocalPollution85==TRUE & data$possibleDAC==TRUE
+sum(data$LOCALDAC,na.rm=T) #291
+
+# Uncomment the next line if you want to export the data as a shapefile.
+
+# data %>% select(
+#   GEOID,PollutionAWeighted,median_income,HighLocalPollution75,HighLocalPollution85,HighLocalPollution90,Pollution_County,CountyPercentile,LowIncomeTract,LowIncomeState,possibleDAC,Disadvantaged_Complete) %>% 
+#   st_write("Output/Shape/data9.shp")
 
 ```
 
